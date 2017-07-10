@@ -1,0 +1,5 @@
+name = NECCS Theme
+description = NEC Cloud System Theme (Sample)
+core = 7.x
+
+stylesheets[all][] = drpthm_neccs_portal.css

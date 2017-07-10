@@ -1,0 +1,4 @@
+name = NECCS Login Module
+description = NEC Cloud System Login Module (Sample)
+core = 7.x
+package = "NECCS"
