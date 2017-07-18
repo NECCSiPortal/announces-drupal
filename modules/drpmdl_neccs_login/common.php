@@ -1,14 +1,28 @@
 <?php
 
 /**
- * Constant New Line Code of HTTP Reponse.
+ * Send a Get Request.
  */
-define("CRLF","\r\n");
+function http_get_request($url, $headers) {
+    $obj = _get_curl_obj($url, $headers);
+    return _http_response($obj);
+}
+
+
+/**
+ * Send a Post Request.
+ */
+function http_post_request($url, $headers, $content) {
+    $obj = _get_curl_obj($url, $headers);
+    curl_setopt($obj, CURLOPT_POSTFIELDS, $content);
+    return _http_response($obj);
+}
+
 
 /**
  * Create Curl Object.
  */
-function get_curl_obj($url, $headers) {
+function _get_curl_obj($url, $headers) {
     watchdog(
         'drpmdl_neccs_login',
         'Curl object: [%url, %header]',
@@ -28,69 +42,64 @@ function get_curl_obj($url, $headers) {
 /**
  * Get HTTP Response.
  */
-function http_response($obj) {
+function _http_response($obj) {
     $result = curl_exec($obj);
     $status_code = curl_getinfo($obj, CURLINFO_HTTP_CODE);
+    $header_size = curl_getinfo($obj, CURLINFO_HEADER_SIZE);
     curl_close($obj);
-    check_status($status_code);
-    $headers = get_response_headers($result);
-    $body = get_response_body($result);
+    _check_status($status_code);
+    $headers = _get_response_headers($result, $header_size);
+    $body = _get_response_body($result, $header_size);
     $response['header'] = $headers;
     $response['body'] = $body;
     return $response;
 }
 
-/**
- * Send a Get Request.
- */
-function http_get_request($url, $headers) {
-    $obj = get_curl_obj($url, $headers);
-    return http_response($obj);
-}
-
-/**
- * Send a Post Request.
- */
-function http_post_request($url, $headers, $content) {
-    $obj = get_curl_obj($url, $headers);
-    curl_setopt($obj, CURLOPT_POSTFIELDS, $content);
-    return http_response($obj);
-}
 
 /**
  * Check Status Code of HTTP Response.
  * if Status Code not equals 200 and 201 then Exception.
  */
-function check_status($staus_code) {
-    if ($staus_code !== 200 && $staus_code !== 201) {
-        throw new ErrorException("An error is occured on establishing connection. \n Please contact to system manager.");
+function _check_status($status_code) {
+    if ($status_code !== 200 && $status_code !== 201) {
+        throw new ErrorException('An error is occurred on establishing connection. Please contact to system manager.');
     }
 }
+
 
 /**
  * Get Header of the HTTP Response.
  */
-function get_response_headers($response)
+function _get_response_headers($response, $header_size)
 {
     $headers = array();
-    $header_text = substr($response, 0, strpos($response, CRLF . CRLF));
-    foreach (explode(CRLF, $header_text) as $i => $line) {
+    $header_text = substr($response, 0, $header_size);
+    $header_text = preg_replace("/\r\n|\r/","\n",$header_text);
+
+    foreach (explode("\n", $header_text) as $i => $line) {
         if ($i === 0) {
             $headers['http_code'] = $line;
         } else {
-            list ($key, $value) = explode(': ', $line);
-            $headers[$key] = $value;
+            if ($line != "") {
+                list ($key, $value) = explode(': ', $line);
+                if ($key != "") {
+                    $headers[$key] = $value;
+                }
+            }
         }
     }
+
     return $headers;
 }
 
 /**
  * Get Body of the HTTP Response.
  */
-function get_response_body($response)
+function _get_response_body($response, $header_size)
 {
     $headers = array();
-    $body = substr($response, strpos($response, CRLF . CRLF) + 3);
+    $body = substr($response, $header_size);
+
+
     return $body;
 }

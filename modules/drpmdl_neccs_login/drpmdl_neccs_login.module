@@ -1,15 +1,228 @@
 <?php
-define("KEYSTONE_URL", "http://192.168.1.1:35357");
-define("KEYSTONE_USER_NAME", "user_name");
-define("KEYSTONE_USER_PASSWORD", "xxxx");
-define("KEYSTONE_ADMIN_PROJECT", "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx");
+define('KEYSTONE_URL', 'http://192.168.1.1:35357');
+define('KEYSTONE_URL_INTERNAL', 'http://192.168.1.1:5000');
+define('KEYSTONE_USER_NAME', 'admin');
+define('KEYSTONE_USER_PASSWORD', 'xxxx');
+define('KEYSTONE_ADMIN_PROJECT', 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx');
 
 define("AFLO_URL", "http://192.168.1.1:9294");
+
+define('DRUPAL_USER_ENTRY_DEFAULT_PASS', 'xxxx');
+
+
+require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'drpmdl_neccs_login') . '/common.php';
+require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'drpmdl_neccs_login') . '/role.php';
+
+
+/**
+ * Implements hook_form_alter().
+ */
+function drpmdl_neccs_login_form_alter(&$form, &$form_state, $form_id) {
+    if ($form_id == 'user_login' || $form_id == 'user_login_block') {
+        $final = array_pop($form['#validate']);
+        $form['#validate'][] = '_drpmdl_neccs_login_authenticate';
+        $form['#validate'][] = $final;
+    }
+}
+
+
+/**
+ * Authenticates the user.
+ */
+function _drpmdl_neccs_login_authenticate($form, &$form_state) {
+    $uid = null;
+    $keystone_authenticate_result = FALSE;
+    $keystone_user_name = null;
+    $keystone_mail = null;
+
+    if (isset($_POST['token'])) {
+        $token = $_POST['token'];
+        $keystone_authenticate_result =
+            _drpmdl_neccs_login_token_authenticate(
+                $token, $keystone_user_name, $keystone_mail);
+    }
+
+    if (!$keystone_authenticate_result) {
+        $name = $_POST['name'];
+        $pass = $_POST['pass'];
+        $keystone_authenticate_result =
+            _drpmdl_neccs_login_keystone_authenticate(
+                $name, $pass, $keystone_user_name, $keystone_mail);
+    }
+
+    if (!$keystone_authenticate_result) {
+        watchdog(
+            'drpmdl_neccs_login',
+            'Token not exists And Keystone user not exists. Change to standard drupal check.',
+            [],
+            WATCHDOG_NOTICE,
+            NULL
+        );
+        return;
+    }
+
+    // Login
+    if (_drpmdl_neccs_login_register(
+        $keystone_user_name, $keystone_mail, $form_state, $uid)) {
+        watchdog(
+            'drpmdl_neccs_login',
+            'Keystone Login Scucess! : ' . $uid,
+            [],
+            WATCHDOG_NOTICE,
+            NULL
+        );
+        $form_state['uid'] = $uid;
+    }
+}
+
+
+/**
+ * Authenticates the keystone token.
+ *
+ * Get User Information from Keystone.
+ */
+function _drpmdl_neccs_login_token_authenticate($token, &$keystone_user_name, &$keystone_mail) {
+    $token_response = null;
+    $url = KEYSTONE_URL_INTERNAL . '/v3/auth/tokens';
+
+    try {
+        $token_response = http_get_request($url, array('X-Auth-Token:'. $token, 'X-Subject-Token:'. $token));
+    } catch (Exception $e) {
+        watchdog(
+            'drpmdl_neccs_login',
+            'Invalid Token Error(%file %line): Token="%token" %message %stacktrace',
+            array('%token'=>$token,
+                  '%file'=>$e->getFile(),
+                  '%line'=>$e->getLine(),
+                  '%message'=>$e->getMessage(),
+                  '%stacktrace'=>$e->getTraceAsString()),
+            WATCHDOG_ERROR,
+            NULL
+        );
+        return FALSE;
+    }
+
+    // Get admin token
+    $admin_token_result = _drpmdl_neccs_login_get_new_token(
+        KEYSTONE_URL, KEYSTONE_USER_NAME, KEYSTONE_USER_PASSWORD, KEYSTONE_ADMIN_PROJECT);
+    $admin_token = $admin_token_result['header']['X-Subject-Token'];
+
+    // Get keystone user information
+    $token_data = json_decode($token_response['body']);
+    $user = $token_data->token->user;
+    $user_data = _drpmdl_neccs_login_get_keystone_user_detail($admin_token, $user->id);
+
+    $keystone_user_name = $user->name;
+    $keystone_mail = $user_data->user->email;
+
+    return TRUE;
+}
+
+
+/**
+ * Authenticates the keystone user.
+ *
+ * Get User Information from Keystone.
+ */
+function _drpmdl_neccs_login_keystone_authenticate($name, $pass, &$keystone_user_name, &$keystone_mail) {
+    $token_response = null;
+
+    try {
+        // get admin token
+        $token_result = _drpmdl_neccs_login_get_new_token(
+            KEYSTONE_URL, KEYSTONE_USER_NAME, KEYSTONE_USER_PASSWORD, KEYSTONE_ADMIN_PROJECT);
+        $token = $token_result['header']['X-Subject-Token'];
+
+        // get users
+        $user_id = _drpmdl_neccs_login_get_keystone_user_id($token, $name);
+        $user_data = _drpmdl_neccs_login_get_keystone_user_detail($token, $user_id);
+
+        // get user project
+        $project_result_body =_drpmdl_neccs_login_get_keystone_user_projects($token, $user_id);
+        $project_id = _get_project_id($project_result_body);
+
+        $token_response = _drpmdl_neccs_login_get_new_token(KEYSTONE_URL_INTERNAL, $name, $pass, $project_id);
+
+    } catch (Exception $e) {
+        watchdog(
+            'drpmdl_neccs_login',
+            'Invalid User Or Password Error(%file %line): Name="%name" %message %stacktrace',
+            array('%name'=>$name,
+                  '%file'=>$e->getFile(),
+                  '%line'=>$e->getLine(),
+                  '%message'=>$e->getMessage(),
+                  '%stacktrace'=>$e->getTraceAsString()),
+            WATCHDOG_ERROR,
+            NULL
+        );
+        return FALSE;
+    }
+
+    $token_data = json_decode($token_response['body']);
+    $keystone_user_name = $token_data->token->user->name;
+    $keystone_mail = $user_data->user->email;
+
+    return TRUE;
+}
+
+
+/**
+ * Register the user if the user doesn't exist yet.
+ */
+function _drpmdl_neccs_login_register($name, $mail, $form_state, &$uid) {
+    $default_password = DRUPAL_USER_ENTRY_DEFAULT_PASS;
+
+    // Get a external account
+    $account = user_external_load($name);
+
+    if (!$account) {
+        // Get a drupal users
+        // if not exists user, create a new entry user for drupal.
+        if ($local_account = user_load_by_name($name)) {
+            $uid = $local_account->uid;
+        } elseif (!_drpmdl_neccs_login_user_register($name, $default_password, $mail, $uid)) {
+            return FALSE;
+        }
+    } else {
+        $uid = $account->uid;
+    }
+
+    user_login_submit(array(), $form_state);
+
+    return TRUE;
+}
+
+
+function _drpmdl_neccs_login_user_register($name, $pass, $mail, &$uid) {
+    // Register a new user
+    $userinfo = array(
+        'name' => $name,
+        'pass' => $pass,
+        'mail' => $mail,
+        'init' => $name,
+        'status' => 1,
+        'access' => REQUEST_TIME,
+    );
+
+    $account = user_save(drupal_anonymous_user(), $userinfo);
+
+    // Set an error if the account registered failed
+    if (!$account) {
+        drupal_set_message(t('System failed in registration of the user account.'), 'error');
+        return FALSE;
+    }
+
+    user_set_authmaps($account, array('authname_rest_auth' => $name));
+
+    $uid = $account->uid;
+    return TRUE;
+}
+
 
 /**
  * Implements hook_user_login().
  *
- * Edit Role and Grant Role  Keystone API,Edit Role Based on Keystone API.
+ * Edit Role and Grant Role Keystone API,Edit Role Based on Keystone API.
  */
 function drpmdl_neccs_login_user_login(&$edit, $account) {
     watchdog(
@@ -21,26 +234,22 @@ function drpmdl_neccs_login_user_login(&$edit, $account) {
         WATCHDOG_NOTICE,
         NULL
     );
-    require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'drpmdl_neccs_login') . "/common.php";
-    require_once DRUPAL_ROOT . '/' . drupal_get_path('module', 'drpmdl_neccs_login') . "/role.php";
+
     try {
         // get token
-        $data = '{"auth":{"identity": {"methods":["password"], "password": {"user":{"name": "' . KEYSTONE_USER_NAME . '","password": "' . KEYSTONE_USER_PASSWORD . '","domain": {"id": "default"}}}}, "scope":{"project": {"id": "' . KEYSTONE_ADMIN_PROJECT . '"}}}}';
+        $token_result = _drpmdl_neccs_login_get_new_token(
+            KEYSTONE_URL, KEYSTONE_USER_NAME, KEYSTONE_USER_PASSWORD, KEYSTONE_ADMIN_PROJECT);
+        $token = $token_result['header']['X-Subject-Token'];
 
-        $token_result = http_post_request(KEYSTONE_URL . "/v3/auth/tokens", array('Content-Type: application/json'), $data);
-        $token = $token_result["header"]["X-Subject-Token"];
         // get users
-        $users_result = http_get_request(KEYSTONE_URL . "/v3/users", array('X-Auth-Token:'. $token));
-        $users_result_body = json_decode($users_result["body"]);
-        $user_id = get_user_id($users_result_body, $account->name);
-        if (empty($user_id)) {
-              throw new ErrorException("An error is occured on establishing connection. \n Please contact to system manager.");
-        }
+        $user_id = _drpmdl_neccs_login_get_keystone_user_id($token, $account->name);
+
         // get user project
-        $project_result = http_get_request(KEYSTONE_URL . "/v3/users/" . $user_id . "/projects", array('X-Auth-Token:'. $token));
-        $project_result_body = json_decode($project_result["body"]);
+        $project_result_body =_drpmdl_neccs_login_get_keystone_user_projects($token, $user_id);
+
         user_role_permission($project_result_body, $account);
-        user_taxonomy_register($project_result_body);
+        _user_taxonomy_register($project_result_body);
+
     } catch (Exception $e) {
         //drupal_goto('/user/logout', array('query' => array('destination' => 'loginError')));
         watchdog(
@@ -56,31 +265,92 @@ function drpmdl_neccs_login_user_login(&$edit, $account) {
     }
 }
 
+/**
+ * Get a new keystone token.
+ */
+function _drpmdl_neccs_login_get_new_token($keystone_url, $name, $pass, $project_id) {
+    $url = $keystone_url . '/v3/auth/tokens';
+    $scope = "";
 
+    if ($project_id != null) {
+        $scope = ', "scope": {"project": {"id": "' . $project_id . '"}}';
+    }
+
+    $data = '{"auth": {' .
+                '"identity": {' .
+                    '"methods": ["password"], ' .
+                    '"password": {"user": {"name": "' . $name . '","password": "' . $pass . '","domain": {"id": "default"}}}' .
+                '} ' . $scope  .
+            '}}';
+
+    return http_post_request($url, array('Content-Type: application/json'), $data);
+}
+
+
+/**
+ * Get a keystone user id.
+ */
+function _drpmdl_neccs_login_get_keystone_user_id($token, $name) {
+    $url = KEYSTONE_URL_INTERNAL . '/v3/users';
+    $users_result = http_get_request($url, array('X-Auth-Token:'. $token));
+    $users_result_body = json_decode($users_result['body']);
+    $user_id = _get_user_id($users_result_body, $name);
+
+    if (empty($user_id)) {
+        throw new ErrorException('An error is occurred on establishing connection. Please contact to system manager.');
+    }
+    return $user_id;
+}
+
+
+/**
+ * Get a keystone user detail.
+ */
+function _drpmdl_neccs_login_get_keystone_user_detail($token, $user_id) {
+    $url = KEYSTONE_URL_INTERNAL . '/v3/users/' . $user_id;
+    $users_result = http_get_request($url, array('X-Auth-Token:'. $token));
+
+    return json_decode($users_result['body']);
+}
+
+
+/**
+ * Get keystone user project data.
+ */
+function _drpmdl_neccs_login_get_keystone_user_projects($token, $user_id) {
+    $url = KEYSTONE_URL_INTERNAL . '/v3/users/' . $user_id . '/projects';
+    $project_result = http_get_request($url, array('X-Auth-Token:'. $token));
+
+    return json_decode($project_result['body']);
+}
+
+
+/**
+ * Implements hook_node_insert().
+ *
+ * Respond to creation of a new node.
+ */
 function drpmdl_neccs_login_node_insert($node) {
+    if (property_exists($node, 'field_tenantid') &&
+        0 < count($node->field_tenantid['und'])) {
 
-    if ( property_exists($node, 'field_tenantid') &&
-         0 < count($node->field_tenantid["und"])
-    ) {
-
-        $taxonomy_term = taxonomy_term_load($node->field_tenantid["und"][0]["tid"]);
+        $taxonomy_term = taxonomy_term_load($node->field_tenantid['und'][0]['tid']);
 
         $name = $taxonomy_term->name;
         $result = db_select('role', 'r')
-        ->fields('r')
-        ->condition('name', $name, '=')
-        ->execute()
-        ->fetchCol();
-
+            ->fields('r')
+            ->condition('name', $name, '=')
+            ->execute()
+            ->fetchCol();
     }
-
 }
+
 
 /**
  * Get User Id from Keystone User by Login User Name.
  */
-function get_user_id($users, $user_name) {
-    $user_id = "";
+function _get_user_id($users, $user_name) {
+    $user_id = '';
     foreach ($users->users as $user) {
         if ($user->name === $user_name) {
             $user_id = $user->id;
@@ -90,7 +360,22 @@ function get_user_id($users, $user_name) {
     return $user_id;
 }
 
+
 /**
+ * Get Top Project Id from Keystone User.
+ */
+function _get_project_id($project_result) {
+    $projects = $project_result->projects;
+    if (count($projects) <= 0) {
+        return null;
+    }
+    return $projects[0]->id;
+}
+
+
+/**
+ * Implements user_role_permission()
+ *
  * Edit Role and Grant Role Based on Affiliation Project Name.
  */
 function user_role_permission($project_result, $user) {
@@ -98,50 +383,48 @@ function user_role_permission($project_result, $user) {
     $target_role_names = $user->roles;
 
     // Prepare reference data.
-    $reffer_role_names = [];
+    $refer_role_names = [];
     foreach($project_result->projects as $project) {
         if (!array_key_exists('id', $project)) {
             // Never reach here, I think.
             watchdog(
                 'drpmdl_neccs_login',
-                'Keyston returns a id-less project on %user_id',
+                'Keystone returns a id-less project on %user_id',
                 array('%user_id'=>$user->name),
                 WATCHDOG_WARNING,
                 NULL
             );
             continue;
         }
-        array_push($reffer_role_names, $project->id);
+        array_push($refer_role_names, $project->id);
     }
 
-    //
     // Adding new role to user (Drupal does not know the user has that role)
-    foreach($reffer_role_names as $reffer_role_name){
+    foreach($refer_role_names as $refer_role_name){
         // Check the user in Drupal already has the role.
-        if (in_array($reffer_role_name, $target_role_names)) {
+        if (in_array($refer_role_name, $target_role_names)) {
             continue;
         }
         // Let create a new role and grant to the user.
-        $new_role = add_role_permission($reffer_role_name);
+        $new_role = add_role_permission($refer_role_name);
         grant_role($user, $new_role);
         watchdog(
             'drpmdl_neccs_login',
             'Added %role_name to %user_id',
-            array('%role_name'=>$reffer_role_name, '%user_id'=>$user->name),
+            array('%role_name'=>$refer_role_name, '%user_id'=>$user->name),
             WATCHDOG_INFO,
             NULL
         );
         // Store it to temporary data.
-        array_push($target_role_names, $reffer_role_name);
+        array_push($target_role_names, $refer_role_name);
     }
 
-    //
     // Removing old role from user
     foreach($target_role_names as $target_role_name){
         if ($target_role_name === 'authenticated user' or $target_role_name === 'administrator') {
             continue;
         }
-        if (in_array($target_role_name, $reffer_role_names)) {
+        if (in_array($target_role_name, $refer_role_names)) {
             continue;
         }
         // Let remove the old role and grant to the user.
@@ -155,46 +438,55 @@ function user_role_permission($project_result, $user) {
             NULL
         );
     }
-
 }
+
 
 /**
  * Get Taxonomy not registered.
  */
-function user_taxonomy_register($project_result) {
-     $vocabulary = taxonomy_vocabulary_machine_name_load("tenantid");
-     $taxonomy = taxonomy_get_tree($vocabulary->vid);
+function _user_taxonomy_register($project_result) {
+    $vocabulary = taxonomy_vocabulary_machine_name_load('tenantid');
+    $taxonomy = taxonomy_get_tree($vocabulary->vid);
 
-     foreach($project_result->projects as $project){
-           $empty = True;
-           foreach($taxonomy as $taxonomy_term){
-                 if($project->id == $taxonomy_term->name){
-                       $empty = False;
-                       break;
-                 }
-           }
-           if($empty){
-                 add_taxonomy($project->id, $vocabulary->vid);
-           }
-     }
-}
-
-function add_taxonomy($project_id, $vid){
-     $taxonomy = new stdClass();
-     $taxonomy->vid = $vid;
-     $taxonomy->name = $project_id;
-     taxonomy_term_save($taxonomy);
-}
-
-function drpmdl_neccs_login_form_node_admin_content_alter(&$form, &$form_state, $form_id) {
-  if (array_key_exists("admin", $form)) {
-    foreach ($form['admin']['nodes']['#options'] as $nid => $row) {
-      $array = array('title'=> 'translate', 'href'=> 'node/'. $nid . '/translate');
-      $form['admin']['nodes']['#options'][$nid]['operations']['data']['#links']['translate'] = $array;
-      if($form['admin']['nodes']['#options'][$nid]['type'] == "Webform"){
-         $array_web = array('title'=> 'webform', 'href'=> 'node/'. $nid . '/webform');
-         $form['admin']['nodes']['#options'][$nid]['operations']['data']['#links']['webform'] = $array_web;
-      }
+    foreach($project_result->projects as $project){
+        $empty = True;
+        foreach($taxonomy as $taxonomy_term){
+            if($project->id == $taxonomy_term->name){
+                $empty = False;
+                break;
+            }
+        }
+        if($empty){
+            _add_taxonomy($project->id, $vocabulary->vid);
+        }
     }
-  }
+}
+
+
+/**
+ * Add new taxonomy.
+ */
+function _add_taxonomy($project_id, $vid){
+    $taxonomy = new stdClass();
+    $taxonomy->vid = $vid;
+    $taxonomy->name = $project_id;
+    taxonomy_term_save($taxonomy);
+}
+
+
+/**
+ * Implements hook_form_node_admin_content_alter()
+ */
+function drpmdl_neccs_login_form_node_admin_content_alter(&$form, &$form_state, $form_id) {
+    if (array_key_exists('admin', $form)) {
+        foreach ($form['admin']['nodes']['#options'] as $nid => $row) {
+            $array = array('title'=> 'translate', 'href'=> 'node/'. $nid . '/translate');
+            $form['admin']['nodes']['#options'][$nid]['operations']['data']['#links']['translate'] = $array;
+
+            if ($form['admin']['nodes']['#options'][$nid]['type'] == 'Webform') {
+                $array_web = array('title'=> 'webform', 'href'=> 'node/'. $nid . '/webform');
+                $form['admin']['nodes']['#options'][$nid]['operations']['data']['#links']['webform'] = $array_web;
+            }
+        }
+    }
 }

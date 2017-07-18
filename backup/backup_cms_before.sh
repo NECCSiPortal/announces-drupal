@@ -7,4 +7,3 @@ SCRIPT_NM=backup_cms.sh
 REULST=$?
 
 exit ${RESULT}
-
