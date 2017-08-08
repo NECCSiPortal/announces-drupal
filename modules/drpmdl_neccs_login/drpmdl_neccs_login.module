@@ -236,19 +236,21 @@ function drpmdl_neccs_login_user_login(&$edit, $account) {
     );
 
     try {
-        // get token
-        $token_result = _drpmdl_neccs_login_get_new_token(
-            KEYSTONE_URL, KEYSTONE_USER_NAME, KEYSTONE_USER_PASSWORD, KEYSTONE_ADMIN_PROJECT);
-        $token = $token_result['header']['X-Subject-Token'];
+        if ($account->name != NULL) {
+            // get token
+            $token_result = _drpmdl_neccs_login_get_new_token(
+                KEYSTONE_URL, KEYSTONE_USER_NAME, KEYSTONE_USER_PASSWORD, KEYSTONE_ADMIN_PROJECT);
+            $token = $token_result['header']['X-Subject-Token'];
 
-        // get users
-        $user_id = _drpmdl_neccs_login_get_keystone_user_id($token, $account->name);
+            // get users
+            $user_id = _drpmdl_neccs_login_get_keystone_user_id($token, $account->name);
 
-        // get user project
-        $project_result_body =_drpmdl_neccs_login_get_keystone_user_projects($token, $user_id);
+            // get user project
+            $project_result_body =_drpmdl_neccs_login_get_keystone_user_projects($token, $user_id);
 
-        user_role_permission($project_result_body, $account);
-        _user_taxonomy_register($project_result_body);
+            user_role_permission($project_result_body, $account);
+            _user_taxonomy_register($project_result_body);
+        }
 
     } catch (Exception $e) {
         //drupal_goto('/user/logout', array('query' => array('destination' => 'loginError')));
